@@ -5,19 +5,33 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from fastapi_zero.app import app
+from fastapi_zero.database import get_session
 from fastapi_zero.models import User, table_registry
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
+def client(session):
+
+    def get_section_override():
+        return session
+
+    with TestClient(app) as client:
+        app.dependency_overrides[get_session] = get_section_override
+        yield client
+
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
 def session():
-    engine = create_engine('sqlite:///:memory:')  # Creating sqlite in memory
+    engine = create_engine(
+        'sqlite:///:memory:',
+        connect_args={'check_same_thread': False},
+        poolclass=StaticPool,
+    )  # Creating sqlite in memory
 
     table_registry.metadata.create_all(engine)
     # Creating all tables in sqlite db
@@ -33,13 +47,15 @@ def session():
 @contextmanager
 def _mock_db_time(model=User, time=datetime(2025, 12, 1)):
     """
-        If an event occur in my database, this function could capture
-        the datetime and return this time to the test
+    If an event occur in my database, this function could capture
+    the datetime and return this time to the test
     """
+
     # Change every time the event occurs
     def fake_time_hook(mapper, connection, target):
         if hasattr(target, 'created_at'):
             target.created_at = time
+
     event.listen(model, 'before_insert', fake_time_hook)  # Listening
 
     yield time
@@ -50,3 +66,17 @@ def _mock_db_time(model=User, time=datetime(2025, 12, 1)):
 @pytest.fixture
 def mock_db_time():
     return _mock_db_time
+
+
+@pytest.fixture
+def user(session):
+    user = User(
+        username='Teste',
+        email='teste@test.com',
+        password='testtest',
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    return user

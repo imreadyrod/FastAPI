@@ -1,19 +1,21 @@
 from http import HTTPStatus
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
+from fastapi_zero.database import get_session
+from fastapi_zero.models import User
 from fastapi_zero.schemas import (
     Message,
-    UserDB,
     UserList,
     UserPublic,
     UserSchema,
 )
 
 app = FastAPI(title='API do ROD')
-
-database = []
 
 
 @app.get('/', status_code=HTTPStatus.OK, response_model=Message)
@@ -35,44 +37,98 @@ def exercicio_aula_02():
 
 
 @app.post('/users/', status_code=HTTPStatus.CREATED, response_model=UserPublic)
-def create_user(user: UserSchema):
-    user_with_id = UserDB(**user.model_dump(), id=len(database) + 1)
+def create_user(user: UserSchema, session=Depends(get_session)):
 
-    database.append(user_with_id)
+    # Scalar search for one
+    # Scalar search for multiples
+    db_user = session.scalar(
+        select(User).where(
+            (User.username == user.username) | (User.email == user.email)
+        )
+    )
 
-    return user_with_id
+    # Scalar will return or User or None
+    # db_user: User | None
+    # If not return error
+    if db_user:
+        if db_user.username == user.username:
+            raise HTTPException(
+                detail='Username already exist',
+                status_code=HTTPStatus.CONFLICT,
+            )
+
+        elif db_user.email == user.email:
+            raise HTTPException(
+                detail='Email already exist', status_code=HTTPStatus.CONFLICT
+            )
+
+    db_user = User(
+        username=user.username, email=user.email, password=user.password
+    )
+
+    session.add(db_user)
+    session.commit()
+    session.refresh(db_user)
+
+    return db_user
 
 
 @app.get('/users/', status_code=HTTPStatus.OK, response_model=UserList)
-def read_users():
-    return {'users': database}
+def read_users(
+    limit: int = 10, offset: int = 0, session: Session = Depends(get_session)
+):
+
+    users = session.scalars(select(User).limit(limit).offset(offset))
+    return {'users': users}
 
 
 @app.put(
     '/users/{user_id}', status_code=HTTPStatus.OK, response_model=UserPublic
 )
-def update_user(user_id: int, user: UserSchema):
+def update_user(
+    user_id: int, user: UserSchema, session: Session = Depends(get_session)
+):
+    # Select from table Users, where User.id is equal to the parameter passed
+    user_db = session.scalar(select(User).where(User.id == user_id))
 
-    if user_id < 1 or user_id > len(database):
+    # If query not found, Raise NOT_FOUND status
+    if not user_db:
         raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND, detail='User not found!'
+            status_code=HTTPStatus.NOT_FOUND, detail='User not found'
         )
 
-    user_with_id = UserDB(**user.model_dump(), id=user_id)
+    try:
+        user_db.email = user.email
+        user_db.username = user.username
+        user_db.password = user.password
 
-    database[user_id - 1] = user_with_id
+        session.add(user_db)
+        session.commit()
+        session.refresh(user_db)
 
-    return user_with_id
+        return user_db
+    except IntegrityError:
+        raise HTTPException(
+                detail='Username or Email already exist',
+                status_code=HTTPStatus.CONFLICT,
+            )
 
 
 @app.delete(
-    '/users/{user_id}', status_code=HTTPStatus.OK, response_model=UserPublic
+    '/users/{user_id}', status_code=HTTPStatus.OK, response_model=Message
 )
-def delete_user(user_id: int):
+def delete_user(user_id: int, session: Session = Depends(get_session)):
 
-    if user_id < 1 or user_id > len(database):
+    # Select from table Users, where User.id is equal to the parameter passed
+    user_db = session.scalar(select(User).where(User.id == user_id))
+
+    # If query not found, Raise NOT_FOUND status
+    if not user_db:
         raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND, detail='User not found!'
+            status_code=HTTPStatus.NOT_FOUND, detail='User not found'
         )
 
-    return database.pop(user_id - 1)
+    session.delete(user_db)
+    session.commit()
+
+    return {'message': 'User deleted'}
